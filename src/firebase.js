@@ -13,8 +13,10 @@ const firebaseConfig = {
 
 export const app = initializeApp(firebaseConfig);
 
-// Only while testing on your computer
-if (import.meta.env.DEV) {
+// App Check debug token (the contest accepts debug tokens).
+if (import.meta.env.VITE_APPCHECK_DEBUG_TOKEN) {
+    self.FIREBASE_APPCHECK_DEBUG_TOKEN = import.meta.env.VITE_APPCHECK_DEBUG_TOKEN;
+} else if (import.meta.env.DEV) {
     self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
 }
 
