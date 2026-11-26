@@ -1,64 +1,42 @@
-import { localModel, cloudModel } from "./firebase.js";
+import { cloudModel } from "./firebase.js";
+import { detect } from "./detect.js";
+import { nanoDetect } from "./nano.js";
+import { reviewItems } from "./review.js";
+import { mergeItems, buildSafe } from "./redactor.js";
 
 const $ = (id) => document.getElementById(id);
 
 // ---------- Routing Ledger ----------
 const ledger = [];
 function log(step, route, detail) {
-  ledger.push({ step, route, detail });
+  const r = String(route).toUpperCase();
+  ledger.push({ step, route: r, detail });
   $("ledger").innerHTML = ledger
     .map((e) => `<div><b class="${e.route === "ON_DEVICE" ? "local" : "cloud"}">${e.route}</b> | ${e.step}: ${e.detail}</div>`)
     .join("");
 }
 
-// ---------- Rule-based backup so redaction never relies only on the small model ----------
-const PATTERNS = [
-  ["EMAIL", /[\w.+-]+@[\w-]+\.[\w.-]+/g],
-  ["PHONE", /\+?\d[\d\s-]{8,}\d/g],
-  ["ID", /\b\d{8,}\b/g],
-];
-
-// ---------- Step 1: redact on-device ----------
-async function redact(text) {
-  const found = new Map(); // original text -> TYPE
-  const prompt =
-    `Find personal identifiers in the text below. Include EVERY person's full name (check each one), phone numbers, ` +
-    `emails, street addresses, bank account or government ID numbers, and dates of birth. ` +
-    `Do NOT include money amounts, rent, deposits, percentages, cities or general dates. ` +
-    `Return ONLY a JSON array like [{"text":"exact substring","type":"PERSON"}]. ` +
-    `Types: PERSON, PHONE, EMAIL, ADDRESS, ID, DOB. ` +
-    `Each "text" must be copied exactly from the document.\n\nText:\n${text}`;
-
-  const result = await localModel().generateContent(prompt); // throws if no on-device model
-  const source = result.response.inferenceSource ?? "ON_DEVICE";
-
-  try {
-    const raw = result.response.text().replace(/```json|```/g, "").trim();
-    for (const item of JSON.parse(raw)) {
-      const type = String(item.type || "ITEM").toUpperCase().replace(/[^A-Z]/g, "") || "ITEM";
-      if (type === "ID" && String(item.text).replace(/\D/g, "").length < 8) continue; // short numbers are usually amounts
-      if (item.text && text.includes(item.text)) found.set(item.text, type);
+// ---------- Retry helper for busy cloud models ----------
+async function withRetry(fn, tries = 4) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = String(e && e.message);
+      const busy = /\b(500|503)\b/.test(msg);
+      if (!busy || i === tries - 2) throw e;
+      await new Promise((r) => setTimeout(r, 3000 * (i + 1)));
     }
-  } catch {
-    log("Redaction", "ON_DEVICE", "model output unreadable, using rules only");
   }
+}
 
-  for (const [type, re] of PATTERNS) {
-    for (const m of text.match(re) ?? []) if (!found.has(m.trim())) found.set(m.trim(), type);
-  }
-
-  // Replace longest strings first, build placeholder map (stays in memory only).
-  const counters = {};
-  const map = {};
-  let safe = text;
-  for (const original of [...found.keys()].sort((a, b) => b.length - a.length)) {
-    const type = found.get(original);
-    counters[type] = (counters[type] || 0) + 1;
-    const placeholder = `[${type}_${counters[type]}]`;
-    map[placeholder] = original;
-    safe = safe.split(original).join(placeholder);
-  }
-  return { safe, map, source };
+// ---------- Step 1: find personal details on-device (Gemini Nano + rules) ----------
+async function findItems(text) {
+  const nano = await nanoDetect(text); // throws if no on-device model
+  const rules = detect(text).map((i) => ({ type: i.type, value: i.value, source: "regex" }));
+  const longNumbers = (text.match(/\b\d{8,}\b/g) ?? []).map((v) => ({ type: "ID", value: v, source: "regex" }));
+  const items = mergeItems(rules, longNumbers, nano.items);
+  return { items, source: nano.source, readable: nano.readable };
 }
 
 // ---------- Step 3: restore on-device ----------
@@ -83,20 +61,41 @@ $("go").onclick = async () => {
   if (!text) return;
   ledger.length = 0;
   $("ledger").textContent = "";
+  $("review").innerHTML = "";
   $("safe").textContent = "Working...";
   $("answer").textContent = "";
   let stage = "redaction";
 
   try {
     let t = performance.now();
-    const { safe, map, source } = await redact(text);
-    log("Redaction", source, `${Object.keys(map).length} personal items hidden, 0 sent to cloud (${Math.round(performance.now() - t)} ms)`);
+    const { items, source, readable } = await findItems(text);
+    const nRegex = items.filter((i) => i.source === "regex").length;
+    const nNano = items.filter((i) => i.source === "gemini-nano").length;
+    if (!readable) log("Detection", "ON_DEVICE", "Gemini Nano output was unreadable, using rules only");
+    log("Detection", source, `regex found ${nRegex}, Gemini Nano found ${nNano} (${Math.round(performance.now() - t)} ms)`);
+
+    // Review before anything leaves the device
+    $("safe").textContent = "Review the list above. Nothing has been sent to the cloud yet.";
+    const approved = await reviewItems($("review"), items);
+    const left = items.filter((i) => !approved.some((a) => a.value === i.value));
+    if (left.length) log("Review", "ON_DEVICE", `you chose to leave ${left.length} detected item(s) visible`);
+    if (!approved.length && !window.confirm("Nothing is selected to hide, so your full text would go to the cloud. Send anyway?")) {
+      $("safe").textContent = "Cancelled. Nothing was sent.";
+      log("Stopped", "ON_DEVICE", "cancelled by you, nothing left the device");
+      return;
+    }
+
+    const { safe, map } = buildSafe(text, approved);
+    log("Redaction", "ON_DEVICE", `${Object.keys(map).length} personal items hidden, 0 sent to cloud`);
     $("safe").textContent = safe;
 
     stage = "reasoning";
     t = performance.now();
-    const res = await cloudModel().generateContent(
-      `${$("task").value}\nKeep placeholders like [PERSON_1] exactly as written.\n\nDocument:\n${safe}`
+    $("answer").textContent = "Asking the cloud (it retries automatically if busy)...";
+    const res = await withRetry(() =>
+      cloudModel().generateContent(
+        `${$("task").value}\nText in square brackets like [PERSON_1] or [PHONE_1] stands for hidden details. Keep them exactly as written and never invent new bracketed placeholders.\n\nDocument:\n${safe}`
+      )
     );
     log("Reasoning", res.response.inferenceSource ?? "IN_CLOUD", `anonymized text only (${Math.round(performance.now() - t)} ms)`);
 

@@ -1,20 +1,46 @@
+// nano.js: finds personal details with Gemini Nano, on your device only.
 import { localModel } from "./firebase.js";
 
-export async function nanoDetect(text) {
-    const prompt =
-        "Find personal details in the text: people's names, street addresses, cities, " +
-        "and employer or company names that identify a person. " +
-        'Reply with ONLY a JSON array like [{"type":"PERSON","value":"exact words from the text"}]. ' +
-        "Allowed types: PERSON, ADDRESS, CITY, ORG. If nothing is found reply []\n\nTEXT:\n" + text;
-    const res = await localModel().generateContent(prompt);
-    const raw = res.response.text();
-    const a = raw.indexOf("["), b = raw.lastIndexOf("]");
-    if (a === -1 || b === -1) return [];
+function parseNanoItems(raw) {
+    const cleaned = String(raw || "").replace(/```json|```/gi, "");
+    const start = cleaned.indexOf("[");
+    const end = cleaned.lastIndexOf("]");
+    if (start === -1 || end <= start) return null;
     try {
-        return JSON.parse(raw.slice(a, b + 1))
-            .filter((x) => x && typeof x.value === "string" && text.includes(x.value))
-            .map((x) => ({ type: x.type || "OTHER", value: x.value, source: "gemini-nano" }));
+        const arr = JSON.parse(cleaned.slice(start, end + 1));
+        return Array.isArray(arr) ? arr : null;
     } catch {
-        return [];
+        return null;
     }
+}
+
+export async function nanoDetect(text) {
+    const prompt = `Find personal identifiers in the document below: person names, street addresses, phone numbers, emails, ID or account numbers, dates of birth.
+
+Example input: "Call Anita Rao at 9000000000, 5 MG Road, Pune."
+Example output: [{"text":"Anita Rao","type":"PERSON"},{"text":"5 MG Road, Pune","type":"ADDRESS"}]
+
+Reply with ONLY the JSON array, nothing else.
+Each "text" must be copied exactly from the document.
+
+Document:
+${text}`;
+
+    // Throws if there is no on-device model, so main.js stops. No cloud fallback.
+    const result = await localModel().generateContent(prompt);
+    const parsed = parseNanoItems(result.response.text());
+
+    if (!parsed) {
+        return { items: [], source: "ON_DEVICE", readable: false };
+    }
+
+    const items = parsed
+        .filter((p) => p && p.text && p.type)
+        .map((p) => ({
+            type: String(p.type).toUpperCase(),
+            value: String(p.text),
+            source: "gemini-nano",
+        }));
+
+    return { items, source: "ON_DEVICE", readable: true };
 }

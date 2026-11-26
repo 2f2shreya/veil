@@ -33,4 +33,7 @@ export const localModel = () =>
 
 // Step 2: reasoning. Runs ONLY in the cloud, used on anonymized text only.
 export const cloudModel = () =>
-    getGenerativeModel(ai, { mode: InferenceMode.ONLY_IN_CLOUD, model: "gemini-2.5-flash" });
+    getGenerativeModel(ai, {
+        mode: InferenceMode.ONLY_IN_CLOUD,
+        inCloudParams: { model: "gemini-3.5-flash-lite" },
+    });
