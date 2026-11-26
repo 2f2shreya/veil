@@ -48,3 +48,4 @@ Vite, JavaScript, Firebase AI Logic, Firebase App Check, Firebase Hosting, Gemin
 
 ## License
 Apache-2.0
+ **You stay in control.** Before anything is sent, Veil lists everything it found (regex rules plus Gemini Nano) and lets you untick wrong items or add missed ones.
