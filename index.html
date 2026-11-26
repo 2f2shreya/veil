@@ -42,6 +42,22 @@
       padding: 8px 14px;
       font-size: 1rem;
     }
+
+    #review {
+      margin: 8px 0 16px;
+    }
+
+    #review label {
+      display: block;
+      padding: 2px 0;
+    }
+
+    #review input[type="text"],
+    #review input:not([type]) {
+      padding: 6px 8px;
+      font-size: 1rem;
+      margin-right: 6px;
+    }
   </style>
 </head>
 
@@ -58,6 +74,8 @@
     </select>
     <button id="go">Analyze</button>
   </p>
+
+  <div id="review"></div>
 
   <h3>1. What the cloud sees</h3>
   <div id="safe" class="box"></div>
